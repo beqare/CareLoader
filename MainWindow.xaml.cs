@@ -1,14 +1,24 @@
 ﻿using Ookii.Dialogs.Wpf;
 using System.Diagnostics;
 using System.IO;
+using System.Net;
 using System.Reflection;
+using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Media.Imaging;
 
 namespace CareLoader
 {
     public partial class MainWindow : Window
     {
+        public MainWindow()
+        {
+            InitializeComponent();
+            var downloadsPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads");
+            PathBox.Text = downloadsPath;
+        }
+
         private string? ExtractYtDlpExe()
         {
             var tempPath = Path.Combine(Path.GetTempPath(), "yt-dlp.exe");
@@ -33,13 +43,6 @@ namespace CareLoader
             return tempPath;
         }
 
-        public MainWindow()
-        {
-            InitializeComponent();
-            var downloadsPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads");
-            PathBox.Text = downloadsPath;
-        }
-
         private void BrowseButton_Click(object sender, RoutedEventArgs e)
         {
             var dialog = new VistaFolderBrowserDialog();
@@ -47,6 +50,32 @@ namespace CareLoader
             {
                 PathBox.Text = dialog.SelectedPath;
             }
+        }
+
+        private void ClearPlaceholder(object sender, RoutedEventArgs e)
+        {
+            if (UrlBox.Text == "https://www.youtube.com/watch?v=...")
+                UrlBox.Clear();
+        }
+
+        private void LoadThumbnail(string url)
+        {
+            try
+            {
+                var match = Regex.Match(url, @"(?:youtu\.be/|v=)([a-zA-Z0-9_-]{11})");
+                if (!match.Success) return;
+
+                string videoId = match.Groups[1].Value;
+                string thumbUrl = $"https://img.youtube.com/vi/{videoId}/maxresdefault.jpg";
+
+                BitmapImage bitmap = new BitmapImage();
+                bitmap.BeginInit();
+                bitmap.UriSource = new Uri(thumbUrl);
+                bitmap.CacheOption = BitmapCacheOption.OnLoad;
+                bitmap.EndInit();
+
+            }
+            catch { /* ignoriere Fehler */ }
         }
 
         private void DownloadButton_Click(object sender, RoutedEventArgs e)
@@ -67,9 +96,29 @@ namespace CareLoader
                 return;
 
             string outputTemplate = Path.Combine(savePath, "%(title)s.%(ext)s");
-            string args = $"-f \"{quality}\" " +
-                          $"{(format == "mp3" ? "--extract-audio --audio-format mp3" : "")} " +
-                          $"-o \"{outputTemplate}\" \"{url}\"";
+            string args;
+
+            if (format == "mp3")
+            {
+                args = $"--extract-audio --audio-format mp3 -o \"{outputTemplate}\" \"{url}\"";
+            }
+            else
+            {
+                string ytQuality = quality switch
+                {
+                    "1080p" => "bestvideo[height<=1080]+bestaudio/best[height<=1080]",
+                    "720p" => "bestvideo[height<=720]+bestaudio/best[height<=720]",
+                    "worst" => "worst",
+                    _ => "best"
+                };
+
+                args = $"-f \"{ytQuality}\" -o \"{outputTemplate}\" \"{url}\"";
+            }
+
+            OutputBox.Clear();
+            DownloadProgressBar.Value = 0;
+
+            LoadThumbnail(url);
 
             var psi = new ProcessStartInfo
             {
@@ -86,13 +135,31 @@ namespace CareLoader
             process.OutputDataReceived += (s, ev) =>
             {
                 if (!string.IsNullOrWhiteSpace(ev.Data))
-                    Dispatcher.Invoke(() => OutputBox.AppendText(ev.Data + Environment.NewLine));
+                {
+                    Dispatcher.Invoke(() =>
+                    {
+                        OutputBox.AppendText(ev.Data + Environment.NewLine);
+                        OutputBox.ScrollToEnd();
+
+                        var match = Regex.Match(ev.Data, @"\b(\d{1,3}\.\d)%");
+                        if (match.Success && double.TryParse(match.Groups[1].Value, out var percent))
+                        {
+                            DownloadProgressBar.Value = percent;
+                        }
+                    });
+                }
             };
 
             process.ErrorDataReceived += (s, ev) =>
             {
                 if (!string.IsNullOrWhiteSpace(ev.Data))
-                    Dispatcher.Invoke(() => OutputBox.AppendText("Fehler: " + ev.Data + Environment.NewLine));
+                {
+                    Dispatcher.Invoke(() =>
+                    {
+                        OutputBox.AppendText("Fehler: " + ev.Data + Environment.NewLine);
+                        OutputBox.ScrollToEnd();
+                    });
+                }
             };
 
             process.Start();
